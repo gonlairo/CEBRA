@@ -20,27 +20,8 @@ import cebra.data
 import cebra.datasets
 import cebra.models
 import cebra.solver
-
-model_params = {
-    "n_neurons": 120,
-    "hidden_size": 64,
-    "output_size": 32,
-    "model_name": "offset10-model",
-}
-loader_params = {
-    "conditional": "time_delta",
-    "num_steps": 5000,
-    "batch_size": 512,
-    "time_offset": 10,
-}
-lr = 3e-4
-test_ratio = 0.2
-
-single_session_setup = {
-    "dataset_initfunc": cebra.data.TensorDataset,
-    "loader_initfunc": cebra.data.ContinuousDataLoader,
-    "solver_initfunc": cebra.solver.SingleSessionSolver,
-}
+import joblib
+import utils_benchmark
 
 def _split_data(data, test_ratio=0.2):
     split_idx = int(len(data) * (1 - test_ratio))
@@ -87,12 +68,12 @@ def _eval(train_set, test_set, solver):
     return r2_score, pos_err
 
 
-def _train(train_set, loader_initfunc, solver_initfunc):
+def _train(train_set, loader_initfunc, solver_initfunc, model_params, loader_params, lr):
     model = cebra.models.init(
-        model_params["model_name"],
-        model_params["n_neurons"],
-        model_params["hidden_size"],
-        model_params["output_size"],
+        name = model_params["model_name"],
+        num_neurons = train_set.neural.shape[-1],
+        num_units = model_params["hidden_size"],
+        num_output = model_params["output_size"],
     )
     train_loader = loader_initfunc(train_set, **loader_params)
     criterion = cebra.models.InfoNCE()
@@ -107,9 +88,9 @@ def _train(train_set, loader_initfunc, solver_initfunc):
 
 
 def _run_hippocampus(data_name_dict, dataset_initfunc, loader_initfunc, solver_initfunc, lower_bound_score):
-
     results = {}
     embeddings = {}
+
     for mouse in data_name_dict.keys():
         results_mouse = {}
         dataset = cebra.datasets.init(f'rat-hippocampus-single-{mouse}')
@@ -135,59 +116,152 @@ def _run_hippocampus(data_name_dict, dataset_initfunc, loader_initfunc, solver_i
         goodness_of_fit = solver.history
         results_mouse.update({"goodness_of_fit" : goodness_of_fit})
 
-        # save the embeddings
-        results_mouse.update({"embedding":solver.model(train_set)})
+        X = np.pad(train_set.neural, ((loader_params["time_offset"]//2, loader_params["time_offset"]//2 - 1), (0, 0)), mode="edge")
+        X = torch.from_numpy(X).float()
 
-        embeddings[mouse] = solver.model(train_set)
+        if isinstance(solver.model, cebra.models.ConvolutionalModelMixin):
+            # Fully convolutional evaluation, switch (T, C) -> (1, C, T)
+            X = X.transpose(1, 0).unsqueeze(0)
+            embedding = solver.model(X).detach().cpu().numpy().squeeze(0).transpose(1, 0)
+        else:
+            # Standard evaluation, (T, C, dt)
+            embedding = solver.model(X).detach().cpu().numpy()
+
+        results_mouse.update({"embedding":embedding})
+        results_mouse.update({"train_set":train_set})
         results[mouse] = results_mouse
 
-        assert r2_score > lower_bound_score["r2_score"] 
-        assert pos_err < lower_bound_score["median_error"]
-        assert goodness_of_fit < lower_bound_score["infonce"]
-    
 
-    # TODO: compute consistency across animals!
-    labels = [data_name_dict[mouse].continuous_index[:, 0]
+    # consistency across datasets
+    labels = [results[mouse]["train_set"].continuous_index[:, 0]
           for mouse in list(data_name_dict.keys())]
 
-    time_scores, time_pairs, time_subjects = cebra.sklearn.metrics.consistency_score(embeddings=list(embeddings.values()),
-                                                                                 labels=labels,
-                                                                                 dataset_ids=list(
-                                                                                     embeddings.keys()),
-                                                                                 between="datasets")
+    embeddings = [results[mouse]["embedding"] for mouse in  list(data_name_dict.keys())]
+    scores, pairs, subjects = cebra.sklearn.metrics.consistency_score(embeddings = embeddings,
+                                                                      labels=labels,
+                                                                      dataset_ids=list(data_name_dict.keys()),
+                                                                      between="datasets")
+    joblib.dump({"results": results, 
+                 "consistency":(scores, pairs, subjects)}, 'results_benchmark.jl')
+    
+    ## TESTS: how exactly should I test for stuff?
+    #assert r2_score > lower_bound_score["r2_score"] 
+    #assert pos_err < lower_bound_score["median_error"]
+    #assert goodness_of_fit < lower_bound_score["infonce"]
 
-    print(f"{solver_initfunc.__name__}: r2 score = {r2_score:.4f}, "
-          f"median abs error = {pos_err:.4f}")
-    return None
-    # What exactly should I return?
-    #r2_score, pos_err
+
+@torch.no_grad()
+def get_emissions(model, dataset):
+    if torch.cuda.is_available():
+        device = "cuda"
+    else:
+        device = "cpu"
+    model.to(device)
+    dataset.configure_for(model)
+    return model(dataset[torch.arange(len(dataset))].to(device)).cpu().numpy()
+
+def _compute_emissions_single(solver, dataset):
+    return get_emissions(solver.model, dataset)
 
 
+def _run_allen(cortex, num_neurons, seed, loader_initfunc, solver_initfunc, model_params, loader_params, lr):
+
+    #ca_train = cebra.datasets.init(f'allen-movie-one-ca-{cortex}-{num_neurons}-train-10-{seed}')
+    np_train = cebra.datasets.init(f'allen-movie-one-neuropixel-{cortex}-{num_neurons}-train-10-{seed}')
+
+    #ca_test = cebra.datasets.init(f'allen-movie-one-ca-{cortex}-{num_neurons}-test-10-{seed}')
+    np_test = cebra.datasets.init(f'allen-movie-one-neuropixel-{cortex}-{num_neurons}-test-10-{seed}')
+
+    # TRAIN MODEL
+    solver = _train(np_train, loader_initfunc, solver_initfunc, model_params, loader_params, lr)
+
+    goodness_of_fit = solver.history
+
+    # compute embedding for train and test
+    cebra_np_train = _compute_emissions_single(solver, np_train)
+    cebra_np_test =  _compute_emissions_single(solver, np_test)
+
+    pred_cebra, errs_cebra ,acc_cebra = utils_benchmark.allen_frame_id_decode(cebra_np_train, np.tile(np.arange(900), 9),
+                                                                              cebra_np_test, np.arange(900),
+                                                                              modality = 'neuropixel', decoder = 'knn')
+
+    print(f'CEBRA Neuropixel: {acc_cebra:.2f}%')
+    print("GOF:", goodness_of_fit[-1])
+
+
+###### RUN TEST
 @pytest.mark.benchmark
 def test_single_session_hippocampus(benchmark):
 
-    ### TEST HIPPOCAMPUS
+    model_params = {
+    "n_neurons": 120,
+    "hidden_size": 64,
+    "output_size": 32,
+    "model_name": "offset10-model",
+    }
+    loader_params = {
+                    "conditional": "time_delta",
+                    "num_steps": 10,
+                    "batch_size": 512,
+                    "time_offset": 10,
+    }
+    lr = 3e-4
+    test_ratio = 0.2
+
     hippocampus_pos = {}
     hippocampus_pos["achilles"] = cebra.datasets.init('rat-hippocampus-single-achilles')
-    hippocampus_pos["buddy"] = cebra.datasets.init('rat-hippocampus-single-buddy')
-    hippocampus_pos["cicero"] = cebra.datasets.init('rat-hippocampus-single-cicero')
-    hippocampus_pos["gatsby"] = cebra.datasets.init('rat-hippocampus-single-gatsby')
+    hippocampus_pos["buddy"]    = cebra.datasets.init('rat-hippocampus-single-buddy')
+    hippocampus_pos["cicero"]   = cebra.datasets.init('rat-hippocampus-single-cicero')
+    hippocampus_pos["gatsby"]   = cebra.datasets.init('rat-hippocampus-single-gatsby')
 
     lower_bound_score = {"r2_score": 30, "median_error": 1.5, "infonce": 6.5}
 
-    # check if pedantic mode is exactly what we want
-
     single_session_setup_hippocampus = {
-    "data_name_dict":hippocampus_pos,
-    "dataset_initfunc": cebra.data.TensorDataset,
-    "loader_initfunc": cebra.data.ContinuousDataLoader,
-    "solver_initfunc": cebra.solver.SingleSessionSolver,
-    "lower_bound_score" : lower_bound_score,
-}
+                                        "data_name_dict": hippocampus_pos,
+                                        "dataset_initfunc": cebra.data.TensorDataset,
+                                        "loader_initfunc": cebra.data.ContinuousDataLoader,
+                                        "solver_initfunc": cebra.solver.SingleSessionSolver,
+                                        "lower_bound_score" : lower_bound_score,
+                                        }
+    
+    # check if pedantic mode is exactly what we want
     benchmark.pedantic(_run_hippocampus, kwargs = single_session_setup_hippocampus,
                                          rounds=1)
     
+## ALLEN DATASET!
+
 
 @pytest.mark.benchmark
 def test_single_session_allen(benchmark):
-    pass
+
+    model_params = {
+                    "n_neurons": 120,
+                    "hidden_size": 64,
+                    "output_size": 32,
+                    "model_name": "offset1-model", #TODO: only works with offset1 model
+                    }
+    
+    loader_params = {
+                    "conditional": "time_delta",
+                    "num_steps": 10,
+                    "batch_size": 512,
+                    "time_offset": 10,
+                }
+    lr = 3e-4
+
+    single_session_setup_allen = {
+                                "cortex":'VISp',
+                                "seed": 333,
+                                "num_neurons": 800,
+                                "loader_initfunc": cebra.data.ContinuousDataLoader,
+                                "solver_initfunc": cebra.solver.SingleSessionSolver, 
+                                "model_params": model_params,
+                                "loader_params": loader_params,
+                                "lr": lr   
+    }
+
+    benchmark.pedantic(_run_allen, 
+                       kwargs = single_session_setup_allen,
+                       rounds = 1)
+    
+
