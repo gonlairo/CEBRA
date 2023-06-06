@@ -94,7 +94,8 @@ def test_against_baseline_hippocampus(results, consistency_scores, benchmark_jso
 
 
 def _run_hippocampus(data_name_dict, dataset_initfunc, loader_initfunc,
-                     model_params, loader_params, solver_initfunc, lr, test_ratio):
+                     model_params, loader_params, solver_initfunc, lr, test_ratio,
+                     baseline_file):
     
     results = {}
     for mouse in data_name_dict.keys():
@@ -143,7 +144,7 @@ def _run_hippocampus(data_name_dict, dataset_initfunc, loader_initfunc,
                  "consistency":consistency_scores}, 
                 'results_benchmark.jl')
     
-    test_against_baseline_hippocampus(results, consistency_scores, 'benchmark_hippocampus_single.json')
+    test_against_baseline_hippocampus(results, consistency_scores, baseline_file)
         
 
 @torch.no_grad()
@@ -217,7 +218,8 @@ def test_single_session_hippocampus(benchmark):
                                         "model_params": model_params,
                                         "loader_params": loader_params,
                                         "test_ratio" : 0.2,
-                                        "lr": 3e-4
+                                        "lr": 3e-4,
+                                        "baseline_file":'benchmark_hippocampus_single.json'
                                         }
     
     benchmark.pedantic(_run_hippocampus, kwargs = single_session_setup_hippocampus,
