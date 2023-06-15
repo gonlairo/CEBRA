@@ -160,13 +160,17 @@ def get_emissions(model, dataset):
 def _compute_emissions_single(solver, dataset):
     return get_emissions(solver.model, dataset)
 
+def test_against_baseline_allen():
+    pass
 
-def _run_allen(cortex, num_neurons, seed, modality, loader_initfunc, solver_initfunc, model_params, loader_params, lr):
+def _run_allen(cortex, num_neurons, seed, modality, loader_initfunc,
+               solver_initfunc, model_params, loader_params, lr,
+               baseline_file):
 
     if modality == "neuropixel":
         train_data = cebra.datasets.init(f'allen-movie-one-neuropixel-{cortex}-{num_neurons}-train-10-{seed}')
         test_data = cebra.datasets.init(f'allen-movie-one-neuropixel-{cortex}-{num_neurons}-test-10-{seed}')
-    elif modality == "calcium":
+    elif modality == "ca":
         train_data = cebra.datasets.init(f'allen-movie-one-ca-{cortex}-{num_neurons}-train-10-{seed}')
         test_data = cebra.datasets.init(f'allen-movie-one-ca-{cortex}-{num_neurons}-test-10-{seed}')
     else:
@@ -184,8 +188,21 @@ def _run_allen(cortex, num_neurons, seed, modality, loader_initfunc, solver_init
                                                           cebra_np_test, np.arange(900),
                                                           modality = modality, decoder = 'knn')
 
-    print(f'CEBRA Neuropixel: {acc_cebra:.2f}%')
-    print("GOF:", goodness_of_fit[-1])
+
+    # read benchmark file
+    with open(baseline_file, 'r') as file:
+        benchmark = json.load(file)
+
+    key = modality + "_" + str(num_neurons) + "_" + cortex
+    baseline_results = benchmark[key]
+
+    assert goodness_of_fit[-1] < baseline_results["gof"]
+    assert acc_cebra > baseline_results["decoding"]
+
+
+    joblib.dump({"gof": goodness_of_fit[-1], 
+                 "decoding": acc_cebra}, 
+                'results_benchmark_allen.jl')
 
 @pytest.mark.benchmark
 def test_single_session_hippocampus(benchmark):
@@ -233,18 +250,18 @@ def test_single_session_allen(benchmark):
                     "n_neurons": 120,
                     "hidden_size": 64,
                     "output_size": 32,
-                    "model_name": "offset1-model", #TODO: only works with offset1 model
+                    "model_name": "offset1-model",
                     }
     
     loader_params = {
                     "conditional": "time_delta",
-                    "num_steps": 10,
-                    "batch_size": 512,
+                    "num_steps": 8000,
+                    "batch_size": 1024,
                     "time_offset": 10,
                     }
     
     single_session_setup_allen = {
-                                 "modality": "neuropixel",
+                                 "modality": "ca",
                                  "cortex":'VISp',
                                  "seed": 333,
                                  "num_neurons": 800,
@@ -252,7 +269,8 @@ def test_single_session_allen(benchmark):
                                  "solver_initfunc": cebra.solver.SingleSessionSolver, 
                                  "model_params": model_params,
                                  "loader_params": loader_params,
-                                 "lr": 3e-4
+                                 "lr": 3e-4,
+                                 "baseline_file": "benchmark_allen_single.json"
                                 }
 
     benchmark.pedantic(_run_allen, 
