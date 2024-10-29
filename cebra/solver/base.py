@@ -43,6 +43,10 @@ import cebra.io
 import cebra.models
 from cebra.solver.util import Meter
 from cebra.solver.util import ProgressBar
+import numpy as np
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score, classification_report
+import os
 
 
 @dataclasses.dataclass
@@ -74,7 +78,13 @@ class Solver(abc.ABC, cebra.io.HasDevice):
         "pos": [],
         "neg": [],
         "total": [],
-        "temperature": []
+        #"pos_valid": [],
+        #"neg_valid": [],
+        "total_train": [],
+        "total_valid": [],
+        "accuracy_train": [],
+        "accuracy_valid": [],
+        "temperature": [],
     }))
     tqdm_on: bool = True
 
@@ -160,8 +170,8 @@ class Solver(abc.ABC, cebra.io.HasDevice):
     def fit(
         self,
         loader: cebra.data.Loader,
-        valid_loader: cebra.data.Loader = None,
         *,
+        valid_loader: cebra.data.Loader = None,
         save_frequency: int = None,
         valid_frequency: int = None,
         decode: bool = False,
@@ -193,24 +203,36 @@ class Solver(abc.ABC, cebra.io.HasDevice):
             stats = self.step(batch)
             iterator.set_description(stats)
 
-            if save_frequency is None:
-                continue
-            save_model = num_steps % save_frequency == 0
+            #if save_frequency is None:
+            #    continue
+
+            #save_model = num_steps % save_frequency == 0
+
             run_validation = (valid_loader
                               is not None) and (num_steps % valid_frequency
                                                 == 0)
             if run_validation:
-                validation_loss = self.validation(valid_loader)
-                if self.best_loss is None or validation_loss < self.best_loss:
-                    self.best_loss = validation_loss
-                    self.save(logdir, "checkpoint_best.pth")
-            if save_model:
-                if decode:
-                    self.decode_history.append(
-                        self.decoding(loader, valid_loader))
-                if save_hook is not None:
-                    save_hook(num_steps, self)
-                self.save(logdir, f"checkpoint_{num_steps:#07d}.pth")
+                valid_loss, accuracy_train, accuracy_valid = self.validation(
+                    loader, valid_loader)
+                self.log["total_valid"].append(valid_loss)
+                self.log["accuracy_train"].append(accuracy_train)
+                self.log["accuracy_valid"].append(accuracy_valid)
+
+                # validation_metrics = None
+
+                # if decode:
+                #     self.decode_history.append(
+                #         self.decoding(loader, valid_loader))
+
+                #if self.best_loss is None or validation_loss < self.best_loss:
+                #    self.best_loss = validation_loss
+                #    self.save(logdir, "checkpoint_best.pth")
+
+            # if save_model:
+            #     self.save(logdir, f"checkpoint_{num_steps:#07d}.pth")
+
+        # print("Saving final checkpoint...")
+        # self.save(logdir, f"checkpoint_final.pth")
 
     def step(self, batch: cebra.data.Batch) -> dict:
         """Perform a single gradient update.
@@ -240,8 +262,38 @@ class Solver(abc.ABC, cebra.io.HasDevice):
             self.log[key].append(value)
         return stats
 
+    def get_validation_loss(self,
+                            valid_loader,
+                            session_id: Optional[int] = None):
+
+        assert (session_id is None) or (session_id == 0)
+
+        total_loss = []
+        self.model.eval()
+        for batch in valid_loader:
+            prediction = self._inference(batch)
+            loss, _, _ = self.criterion(prediction.reference,
+                                        prediction.positive,
+                                        prediction.negative)
+            total_loss.append(loss.item())
+        return np.mean(total_loss)
+
+    def compute_embedding(self, loader):
+        embedding = []
+        batch_size = 2048
+
+        neural_data = loader.dataset[torch.arange(len(loader.dataset.neural))]
+        for i in range(0, len(neural_data), batch_size):
+            batch = neural_data[i:i + batch_size]
+            embedding.append(self.transform(batch))
+
+        embedding = torch.cat(embedding, dim=0).detach().cpu().numpy()
+
+        return embedding
+
     def validation(self,
-                   loader: cebra.data.Loader,
+                   train_loader: cebra.data.Loader,
+                   valid_loader: cebra.data.Loader,
                    session_id: Optional[int] = None):
         """Compute score of the model on data.
 
@@ -255,33 +307,47 @@ class Solver(abc.ABC, cebra.io.HasDevice):
             Loss averaged over iterations on data batch.
         """
         assert (session_id is None) or (session_id == 0)
-        iterator = self._get_loader(loader)
-        total_loss = Meter()
         self.model.eval()
-        for _, batch in iterator:
-            prediction = self._inference(batch)
-            loss, _, _ = self.criterion(prediction.reference,
-                                        prediction.positive,
-                                        prediction.negative)
-            total_loss.add(loss.item())
-        return total_loss.average
 
-    @torch.no_grad()
-    def decoding(self, train_loader, valid_loader):
-        """Deprecated since 0.0.2."""
-        train_x = self.transform(train_loader.dataset[torch.arange(
-            len(train_loader.dataset.neural))])
-        train_y = train_loader.dataset.index
-        valid_x = self.transform(valid_loader.dataset[torch.arange(
-            len(valid_loader.dataset.neural))])
-        valid_y = valid_loader.dataset.index
-        decode_metric = train_loader.dataset.decode(
-            train_x.cpu().numpy(),
-            train_y.cpu().numpy(),
-            valid_x.cpu().numpy(),
-            valid_y.cpu().numpy(),
+        embedding_train = self.compute_embedding(train_loader)
+        embedding_valid = self.compute_embedding(valid_loader)
+        valid_loss = self.get_validation_loss(valid_loader)
+
+        train_labels = train_loader.dataset.discrete.detach().cpu().numpy()
+        valid_labels = valid_loader.dataset.discrete.detach().cpu().numpy()
+
+        print("Training logistic regression model...")
+        lr = LogisticRegression()
+        lr.fit(embedding_train, train_labels)
+
+        prediction_train = lr.predict(embedding_train)
+        prediction_valid = lr.predict(embedding_valid)
+
+        accuracy_train = accuracy_score(train_labels, prediction_train)
+        accuracy_valid = accuracy_score(valid_labels, prediction_valid)
+
+        print(
+            f"Accuracy train: {accuracy_train:.2f}, accuracy test: {accuracy_valid:.2f}"
         )
-        return decode_metric
+
+        return valid_loss, accuracy_train, accuracy_valid
+
+    # @torch.no_grad()
+    # def decoding(self, train_loader, valid_loader):
+    #     """Deprecated since 0.0.2."""
+    #     train_x = self.transform(train_loader.dataset[torch.arange(
+    #         len(train_loader.dataset.neural))])
+    #     train_y = train_loader.dataset.index
+    #     valid_x = self.transform(valid_loader.dataset[torch.arange(
+    #         len(valid_loader.dataset.neural))])
+    #     valid_y = valid_loader.dataset.index
+    #     decode_metric = train_loader.dataset.decode(
+    #         train_x.cpu().numpy(),
+    #         train_y.cpu().numpy(),
+    #         valid_x.cpu().numpy(),
+    #         valid_y.cpu().numpy(),
+    #     )
+    #     return decode_metric
 
     @torch.no_grad()
     def transform(self, inputs: torch.Tensor) -> torch.Tensor:
