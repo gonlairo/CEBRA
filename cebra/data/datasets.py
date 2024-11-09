@@ -66,12 +66,14 @@ class TensorDataset(cebra_data.SingleSessionDataset):
                  neural: Union[torch.Tensor, npt.NDArray],
                  continuous: Union[torch.Tensor, npt.NDArray] = None,
                  discrete: Union[torch.Tensor, npt.NDArray] = None,
+                 discrete_time: Union[torch.Tensor, npt.NDArray] = None,
                  offset: Offset = Offset(0, 1),
                  device: str = "cpu"):
         super().__init__(device=device)
         self.neural = self._to_tensor(neural, check_dtype="float").float()
         self.continuous = self._to_tensor(continuous, check_dtype="float")
         self.discrete = self._to_tensor(discrete, check_dtype="int")
+        self.discrete_time = self._to_tensor(discrete_time, check_dtype="int")
         if self.continuous is None and self.discrete is None:
             raise ValueError(
                 "You have to pass at least one of the arguments 'continuous' or 'discrete'."

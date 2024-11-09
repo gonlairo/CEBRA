@@ -159,6 +159,111 @@ class DiscreteDataLoader(cebra_data.Loader):
 
 
 @dataclasses.dataclass
+class DiscreteTimeDataLoader(cebra_data.Loader):
+
+    prior: str = dataclasses.field(
+        default="empirical",
+        doc="""Re-sampling mode for the discrete index.
+
+    The option `empirical` uses label frequencies as they appear in the dataset.
+    The option `uniform` re-samples the dataset and adjust the frequencies of less
+    common class labels.
+    For balanced datasets, it is typically more accurate to stick to the `empirical`
+    option.
+    """,
+    )
+    
+    time_offset: int = dataclasses.field(default=10)
+
+    @property
+    def index(self):
+        """The (discrete) dataset index."""
+        return self.dataset.discrete_index
+
+    @property
+    def index_time(self):
+        return self.dataset.discrete_time
+    
+    
+    def __post_init__(self):
+        super().__post_init__()
+        if self.dataset.discrete_index is None:
+            raise ValueError("Dataset does not provide a discrete index.")
+        self._init_distribution()
+
+    def _init_distribution(self):
+        self.distribution = cebra.distributions.discrete.DiscreteEmpirical(
+            self.index)
+        
+        assert len(self.index) == len(self.index_time)
+        self.num_samples = len(self.index_time)
+      
+    def sample_indices(self, index_label, index_time, reference_label, reference_time):
+        indices = []
+
+        # Create the full boolean mask for all indices at once
+        mask = (index_label.unsqueeze(1)
+                == reference_label) & (index_time.unsqueeze(1) == reference_time)
+        non_zero_indices = mask.nonzero(as_tuple=True)
+
+        # Iterate over unique pairs in mask and randomly sample
+        for i in range(len(reference_label)):
+
+            # Extract indices for current pair
+            idx_ = non_zero_indices[0][non_zero_indices[1] == i]
+
+            # Sample a random index from these matching indices
+            #assert len(idx_) == 150, print("Index length", len(idx_))
+            random_idx = torch.randint(0, len(idx_), (1, )).item()
+            indices.append(idx_[random_idx])
+
+        indices = torch.stack(indices)
+        return indices
+
+    def get_indices(self, num_samples: int) -> BatchIndex:
+
+        # reference / negative for discrete labels
+        reference_idx_discrete = self.distribution.sample_prior(num_samples * 2)
+        negative_idx_discrete = reference_idx_discrete[num_samples:]
+        reference_idx_discrete = reference_idx_discrete[:num_samples]
+        
+        # reference / negative for time
+        reference_idx_time = torch.randint(0, self.num_samples - self.time_offset,
+                           (num_samples*2,))
+        negative_idx_time = reference_idx_time[num_samples:]
+        reference_idx_time = reference_idx_time[:num_samples]
+
+
+        # refence combined
+        reference_discrete = self.index[reference_idx_discrete]
+        reference_time = self.index_time[reference_idx_time]        
+        reference_idx_combined = self.sample_indices(self.index, 
+                                                    self.index_time, 
+                                                    reference_discrete, 
+                                                    reference_time,)
+
+        # negative combined
+        negative_discrete = self.index[negative_idx_discrete]
+        negative_time = self.index_time[negative_idx_time]
+        negative_idx_combined = self.sample_indices(self.index,
+                                                    self.index_time, 
+                                                    negative_discrete, 
+                                                    negative_time)
+        
+        # positive combined
+        positive_idx_time = reference_idx_time + self.time_offset
+        positive_time = self.index_time[positive_idx_time]
+        positive_idx_combined = self.sample_indices(self.index,
+                                                    self.index_time, 
+                                                    reference_discrete, 
+                                                    positive_time,)
+
+        return BatchIndex(reference=reference_idx_combined,
+                          positive=positive_idx_combined,
+                          negative=negative_idx_combined)
+
+
+@dataclasses.dataclass
 class ContinuousDataLoader(cebra_data.Loader):
     """Contrastive learning conditioned on a continuous behavior variable.
 
@@ -361,7 +466,9 @@ class HybridDataLoader(cebra_data.Loader):
             num_samples=len(self.dataset.neural),
             device=self.device)
         self.behavior_distribution = cebra.distributions.TimedeltaDistribution(
-            self.dataset.continuous_index, self.time_offset, device=self.device)
+            self.dataset.continuous_index,
+            self.time_offset,
+            device=self.device)
 
     def get_indices(self, num_samples: int) -> BatchIndex:
         """Samples indices for reference, positive and negative examples.
