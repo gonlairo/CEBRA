@@ -45,8 +45,8 @@ class Discrete(abc_.ConditionalDistribution, abc_.HasGenerator):
         samples: Discrete index used for sampling
     """
 
-    def _to_numpy_int(self, samples: Union[torch.Tensor,
-                                           npt.NDArray]) -> npt.NDArray:
+    def _to_numpy_int(
+            self, samples: Union[torch.Tensor, npt.NDArray]) -> npt.NDArray:
         if isinstance(samples, torch.Tensor):
             samples = samples.cpu().numpy()
         if not cebra.helper._is_integer(samples):
@@ -79,8 +79,9 @@ class Discrete(abc_.ConditionalDistribution, abc_.HasGenerator):
 
     def _init_transform(self):
         self.counts = np.bincount(self.samples)
-        self.cdf = np.zeros((len(self.counts) + 1,))
+        self.cdf = np.zeros((len(self.counts) + 1, ))
         self.cdf[1:] = np.cumsum(self.counts)
+        #print("cdf", self.cdf)
         # NOTE(stes): This is the only use of a scipy function in the entire code
         # base for now. Replacing scipy.interpolate.interp1d with an equivalent
         # function from torch would make it possible to drop scipy as a dependency
@@ -104,7 +105,7 @@ class Discrete(abc_.ConditionalDistribution, abc_.HasGenerator):
             index samples of this instance with the returned in indices
             will yield a uniform distribution across the discrete values.
         """
-        samples = np.random.uniform(0, self.num_samples, (num_samples,))
+        samples = np.random.uniform(0, self.num_samples, (num_samples, ))
         samples = self.transform(samples).astype(int)
         return self.sorted_idx[samples]
 
@@ -118,10 +119,11 @@ class Discrete(abc_.ConditionalDistribution, abc_.HasGenerator):
             A batch of indices from the empirical distribution,
             which is the uniform distribution over ``[0, N-1]``.
         """
-        samples = np.random.randint(0, self.num_samples, (num_samples,))
+        samples = np.random.randint(0, self.num_samples, (num_samples, ))
         return self.sorted_idx[samples]
 
-    def sample_conditional(self, reference_index: torch.Tensor) -> torch.Tensor:
+    def sample_conditional(self,
+                           reference_index: torch.Tensor) -> torch.Tensor:
         """Draw samples conditional on template samples.
 
         Args:
