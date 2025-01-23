@@ -85,6 +85,7 @@ class Solver(abc.ABC, cebra.io.HasDevice):
         "accuracy_train": [],
         "accuracy_valid": [],
         "temperature": [],
+        "weight_norm": [],
     }))
     tqdm_on: bool = True
 
@@ -212,11 +213,12 @@ class Solver(abc.ABC, cebra.io.HasDevice):
                               is not None) and (num_steps % valid_frequency
                                                 == 0)
             if run_validation:
-                valid_loss, accuracy_train, accuracy_valid = self.validation(
+                valid_loss, accuracy_train, accuracy_valid, weight_norm = self.validation(
                     loader, valid_loader)
                 self.log["total_valid"].append(valid_loss)
                 self.log["accuracy_train"].append(accuracy_train)
                 self.log["accuracy_valid"].append(accuracy_valid)
+                self.log["weight_norm"].append(weight_norm)
 
                 # validation_metrics = None
 
@@ -326,11 +328,18 @@ class Solver(abc.ABC, cebra.io.HasDevice):
         accuracy_train = accuracy_score(train_labels, prediction_train)
         accuracy_valid = accuracy_score(valid_labels, prediction_valid)
 
+        n_train_labels = len(np.unique(train_labels))
+        n_valid_labels = len(np.unique(valid_labels))
+
+        weight_norm = 0
+        for param in self.model.parameters():
+            weight_norm += torch.sum(param**2)
+
         print(
-            f"Accuracy train: {accuracy_train:.2f}, accuracy test: {accuracy_valid:.2f}"
+            f"Accuracy train[{n_train_labels} labels]: {accuracy_train:.2f}, accuracy test[{n_valid_labels} labels]: {accuracy_valid:.2f}"
         )
 
-        return valid_loss, accuracy_train, accuracy_valid
+        return valid_loss, accuracy_train, accuracy_valid, weight_norm.item()
 
     # @torch.no_grad()
     # def decoding(self, train_loader, valid_loader):
