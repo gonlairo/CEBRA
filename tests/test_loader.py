@@ -27,7 +27,7 @@ import cebra.io
 
 
 def parametrize_device(func):
-    _devices = ("cpu", "cuda") if torch.cuda.is_available() else ("cpu",)
+    _devices = ("cpu", "cuda") if torch.cuda.is_available() else ("cpu", )
     return pytest.mark.parametrize("device", _devices)(func)
 
 
@@ -49,7 +49,7 @@ class RandomDataset(cebra.data.SingleSessionDataset):
     def __init__(self, N=100, d=5, device="cpu"):
         super().__init__(device=device)
         self._cindex = torch.randint(0, 5, (N, d), device=device).float()
-        self._dindex = torch.randint(0, 5, (N,), device=device).long()
+        self._dindex = torch.randint(0, 5, (N, ), device=device).long()
         self.neural = self._data = torch.randn((N, d), device=device)
 
     @property
@@ -338,3 +338,55 @@ def test_multisession_loader(data_name, loader_initfunc, device):
         _check_attributes(batch, is_list=True)
         for session_batch in batch:
             assert len(session_batch.positive) == 32
+
+
+def test_discrete_loader_with_offset():
+
+    n_stimuli = 4
+    block_size = 1000
+    neural_data = torch.randn(n_stimuli * block_size, 10)
+
+    index_discrete = torch.tensor(
+        [i for i in range(n_stimuli) for _ in range(block_size)])
+
+    trial_length = 200
+    index_time = torch.cat([
+        torch.arange(trial_length)
+        for _ in range((n_stimuli * block_size) // trial_length)
+    ])
+
+    dataset = cebra.data.TensorDataset(
+        neural_data.type(torch.FloatTensor),
+        discrete=index_discrete.type(torch.LongTensor),
+        discrete_time=index_time.type(torch.LongTensor),
+    )
+
+    batch_size = 500
+    time_offset = 10
+    dataloader = cebra.data.single_session.DiscreteTimeDataLoader(
+        dataset=dataset,
+        num_steps=1,
+        batch_size=batch_size,
+        time_offset=time_offset)
+    index = dataloader.get_indices(batch_size)
+
+    index.reference[0]
+    index.positive[0]
+
+    collect_time = []
+    for i in range(batch_size):
+        assert index_discrete[index.reference[i]] == index_discrete[
+            index.positive[i]]
+        # assert index_time[
+        #     index.reference[i]] == index_time[index.positive[i]] - time_offset
+
+        collect_time.append(index_time[index.positive[i] -
+                                       time_offset] <= trial_length -
+                            time_offset)
+        # assert index_time[index.positive[i] -
+        #                   time_offset] <= trial_length - time_offset
+    import numpy as np
+    print(np.sum(collect_time))
+    #print(index_time[index.positive[i]] + time_offset)
+
+    #assert index_time[index.positive[i] - time_offset] <= index_time[index.reference[i]]

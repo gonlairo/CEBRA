@@ -101,7 +101,8 @@ class Model(nn.Module):
         super().__init__()
         if num_input < 1:
             raise ValueError(
-                f"Input dimension needs to be at least 1, but got {num_input}.")
+                f"Input dimension needs to be at least 1, but got {num_input}."
+            )
         if num_output < 1:
             raise ValueError(
                 f"Output dimension needs to be at least 1, but got {num_output}."
@@ -216,8 +217,8 @@ class _OffsetModel(Model, HasFeatureEncoder):
         super().__init__(num_input=num_input, num_output=num_output)
 
         if normalize:
-            layers += (cebra_layers._Norm(),)
-        layers += (cebra_layers.Squeeze(),)
+            layers += (cebra_layers._Norm(), )
+        layers += (cebra_layers.Squeeze(), )
         self.net = nn.Sequential(*layers)
         # TODO(stes) can this layer be removed? it is already added to
         # the self.net
@@ -249,8 +250,8 @@ class ParameterCountMixin:
     @property
     def num_trainable_parameters(self) -> int:
         """Number of trainable parameters."""
-        return sum(
-            param.numel() for param in self.parameters() if param.requires_grad)
+        return sum(param.numel() for param in self.parameters()
+                   if param.requires_grad)
 
 
 @register("offset10-model")
@@ -279,6 +280,43 @@ class Offset10Model(_OffsetModel, ConvolutionalModelMixin):
         return cebra.data.Offset(5, 5)
 
 
+@register("offset10-model-dropout")
+class Offset10ModelDropout(_OffsetModel, ConvolutionalModelMixin):
+    """CEBRA model with a 10 sample receptive field."""
+
+    def __init__(
+        self,
+        num_neurons,
+        num_units,
+        num_output,
+        dropout_rate,
+        normalize=True,
+    ):
+        if num_units < 1:
+            raise ValueError(
+                f"Hidden dimension needs to be at least 1, but got {num_units}."
+            )
+        super().__init__(
+            nn.Conv1d(num_neurons, num_units, 2),
+            nn.GELU(),
+            nn.Dropout1d(dropout_rate),
+            cebra_layers._Skip(nn.Dropout1d(dropout_rate),
+                               nn.Conv1d(num_units, num_units, 3), nn.GELU()),
+            cebra_layers._Skip(nn.Dropout1d(dropout_rate),
+                               nn.Conv1d(num_units, num_units, 3), nn.GELU()),
+            cebra_layers._Skip(nn.Dropout1d(dropout_rate),
+                               nn.Conv1d(num_units, num_units, 3), nn.GELU()),
+            nn.Conv1d(num_units, num_output, 3),
+            num_input=num_neurons,
+            num_output=num_output,
+            normalize=normalize,
+        )
+
+    def get_offset(self) -> cebra.data.datatypes.Offset:
+        """See :py:meth:`~.Model.get_offset`"""
+        return cebra.data.Offset(5, 5)
+
+
 @register("offset10-model-mse")
 class Offset10ModelMSE(Offset10Model):
     """Symmetric model with 10 sample receptive field, without normalization.
@@ -288,6 +326,25 @@ class Offset10ModelMSE(Offset10Model):
 
     def __init__(self, num_neurons, num_units, num_output, normalize=False):
         super().__init__(num_neurons, num_units, num_output, normalize)
+
+
+@register("offset10-model-mse-dropout")
+class Offset10ModelMSEDropout(Offset10ModelDropout):
+    """Symmetric model with 10 sample receptive field, without normalization.
+
+    Suitable for use with InfoNCE metrics for Euclidean space.
+    """
+
+    def __init__(
+        self,
+        num_neurons,
+        num_units,
+        num_output,
+        dropout_rate,
+        normalize=False,
+    ):
+        super().__init__(num_neurons, num_units, num_output, normalize,
+                         dropout_rate)
 
 
 @register("offset5-model")
@@ -421,9 +478,11 @@ class Offset0Modelv3(_OffsetModel):
                 num_units,
             ),
             nn.GELU(),
-            cebra_layers._Skip(nn.Linear(num_units, num_units), crop=(0, None)),
+            cebra_layers._Skip(nn.Linear(num_units, num_units),
+                               crop=(0, None)),
             nn.GELU(),
-            cebra_layers._Skip(nn.Linear(num_units, num_units), crop=(0, None)),
+            cebra_layers._Skip(nn.Linear(num_units, num_units),
+                               crop=(0, None)),
             nn.GELU(),
             nn.Linear(num_units, num_output),
             num_input=num_neurons,
@@ -497,13 +556,17 @@ class Offset0Modelv5(_OffsetModel):
                 num_units,
             ),
             nn.GELU(),
-            cebra_layers._Skip(nn.Linear(num_units, num_units), crop=(0, None)),
+            cebra_layers._Skip(nn.Linear(num_units, num_units),
+                               crop=(0, None)),
             nn.GELU(),
-            cebra_layers._Skip(nn.Linear(num_units, num_units), crop=(0, None)),
+            cebra_layers._Skip(nn.Linear(num_units, num_units),
+                               crop=(0, None)),
             nn.GELU(),
-            cebra_layers._Skip(nn.Linear(num_units, num_units), crop=(0, None)),
+            cebra_layers._Skip(nn.Linear(num_units, num_units),
+                               crop=(0, None)),
             nn.GELU(),
-            cebra_layers._Skip(nn.Linear(num_units, num_units), crop=(0, None)),
+            cebra_layers._Skip(nn.Linear(num_units, num_units),
+                               crop=(0, None)),
             nn.GELU(),
             nn.Linear(num_units, num_output),
             num_input=num_neurons,
@@ -548,7 +611,8 @@ class ResampleModel(_OffsetModel, ConvolutionalModelMixin, ResampleModelMixin):
 
 @register("resample5-model", deprecated=True)
 @register("offset20-model-4x-subsample")
-class Resample5Model(_OffsetModel, ConvolutionalModelMixin, ResampleModelMixin):
+class Resample5Model(_OffsetModel, ConvolutionalModelMixin,
+                     ResampleModelMixin):
     """CEBRA model with 20 sample receptive field, output normalization and 4x subsampling."""
 
     ##120Hz
